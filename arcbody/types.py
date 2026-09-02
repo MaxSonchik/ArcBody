@@ -202,7 +202,10 @@ class BodyMeasurements:
 class BodyProfile:
     """Everything ArcBody knows about one subject from one request."""
 
-    embedding: np.ndarray | None
+    #: Always an array. An encoder that produced nothing yields an empty one
+    #: rather than ``None``, so callers test :attr:`has_embedding` instead of
+    #: narrowing an optional at five call sites and forgetting at a sixth.
+    embedding: np.ndarray
     measurements: BodyMeasurements
     quality: QualityReport
     observations: list[PersonObservation] = field(default_factory=list)
@@ -211,4 +214,4 @@ class BodyProfile:
 
     @property
     def has_embedding(self) -> bool:
-        return self.embedding is not None and self.embedding.size > 0
+        return self.embedding.size > 0

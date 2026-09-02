@@ -39,9 +39,8 @@ def decode(data: bytes, *, max_pixels: int) -> np.ndarray:
                     pixels=width * height,
                     max_pixels=max_pixels,
                 )
-            image = ImageOps.exif_transpose(image)
-            rgb = image.convert("RGB")
-            array = np.asarray(rgb, dtype=np.uint8)
+            oriented = ImageOps.exif_transpose(image) or image
+            array = np.asarray(oriented.convert("RGB"), dtype=np.uint8)
     except InvalidImageError:
         raise
     except (UnidentifiedImageError, OSError, ValueError) as exc:

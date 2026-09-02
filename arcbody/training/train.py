@@ -25,12 +25,13 @@ import math
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 
 from arcbody.embed.arcface import ArcMarginProduct
 from arcbody.embed.model import ArcBodyNet
@@ -103,7 +104,7 @@ class TrainConfig:
     log_every: int = 20
     metrics_path: Path | None = None
 
-    def as_dict(self) -> dict[str, object]:
+    def as_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["output"] = str(self.output)
         payload["metrics_path"] = str(self.metrics_path) if self.metrics_path else None
@@ -120,32 +121,29 @@ class EpochReport:
     ratio_loss: float
     accuracy: float
     seconds: float
-    validation: dict[str, object] = field(default_factory=dict)
+    validation: dict[str, Any] = field(default_factory=dict)
 
 
-def build_datasets(config: TrainConfig) -> tuple[Dataset, Dataset]:
+def build_datasets(
+    config: TrainConfig,
+) -> tuple[SyntheticBodyDataset, SyntheticBodyDataset]:
     """Train and validation sets over *disjoint* identity pools."""
-    common = {
-        "size": config.image_size,
-        "input_width": config.input_width,
-        "input_height": config.input_height,
-    }
-    train = SyntheticBodyDataset(
-        identities=config.identities,
-        per_identity=config.per_identity,
-        seed=config.seed,
-        easy=config.easy_poses,
-        **common,
-    )
-    validation = SyntheticBodyDataset(
-        identities=config.val_identities,
-        per_identity=config.val_per_identity,
-        # A different seed draws a different pool of people, so no validation
-        # subject is a training subject.
-        seed=config.seed + 9973,
-        easy=config.easy_poses,
-        **common,
-    )
+
+    def build(identities: int, per_identity: int, seed: int) -> SyntheticBodyDataset:
+        return SyntheticBodyDataset(
+            identities=identities,
+            per_identity=per_identity,
+            seed=seed,
+            easy=config.easy_poses,
+            size=config.image_size,
+            input_width=config.input_width,
+            input_height=config.input_height,
+        )
+
+    train = build(config.identities, config.per_identity, config.seed)
+    # A different seed draws a different pool of people, so no validation
+    # subject is a training subject.
+    validation = build(config.val_identities, config.val_per_identity, config.seed + 9973)
     return train, validation
 
 
@@ -183,7 +181,7 @@ def masked_ratio_loss(
 
 
 @torch.no_grad()
-def evaluate(model: ArcBodyNet, loader: DataLoader, device: torch.device) -> dict[str, object]:
+def evaluate(model: ArcBodyNet, loader: DataLoader, device: torch.device) -> dict[str, Any]:
     """Embed the validation set and score verification and identification."""
     model.eval()
     embeddings: list[np.ndarray] = []
@@ -211,7 +209,7 @@ def evaluate(model: ArcBodyNet, loader: DataLoader, device: torch.device) -> dic
     gallery_index = np.array(sorted(first_seen.values()))
     query_index = np.setdiff1d(np.arange(len(all_labels)), gallery_index)
 
-    report: dict[str, object] = {
+    report: dict[str, Any] = {
         "verification": verification_metrics(all_embeddings, all_labels).as_dict(),
         "ratio_mape": round(
             ratio_error(
@@ -232,7 +230,7 @@ def evaluate(model: ArcBodyNet, loader: DataLoader, device: torch.device) -> dic
     return report
 
 
-def train(config: TrainConfig) -> dict[str, object]:
+def train(config: TrainConfig) -> dict[str, Any]:
     """Run the whole fine-tune and write a checkpoint. Returns the final report."""
     torch.manual_seed(config.seed)
     device = torch.device(config.device)
@@ -402,7 +400,7 @@ def train(config: TrainConfig) -> dict[str, object]:
     )
     logger.info("wrote checkpoint to %s", config.output)
 
-    final = {
+    final: dict[str, Any] = {
         "checkpoint": str(config.output),
         "epochs": [
             {

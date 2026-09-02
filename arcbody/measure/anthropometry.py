@@ -304,10 +304,11 @@ def estimate(
     front = _pick(observations, ViewLabel.FRONT) or _pick(observations, ViewLabel.BACK)
     if front is None:
         front = observations[0] if observations else None
-    if front is None or not front.has_mask:
+    front_mask = front.mask if front is not None else None
+    if front is None or front_mask is None or not front_mask.any():
         return BodyMeasurements(notes=["no segmented front view; measurement not attempted"])
 
-    profile = SilhouetteProfile(front.mask)
+    profile = SilhouetteProfile(front_mask)
     stature_px = profile.stature_px
     breadths = _trunk_breadth_ratios(
         profile, front.keypoints, perception.min_keypoint_score
@@ -316,10 +317,11 @@ def estimate(
     ratios = _shape_vector(breadths, lengths)
 
     side = _pick(observations, ViewLabel.SIDE)
+    side_mask = side.mask if side is not None else None
     depths: dict[str, float] = {}
-    if side is not None and side.has_mask:
+    if side is not None and side_mask is not None and side_mask.any():
         depths = _trunk_breadth_ratios(
-            SilhouetteProfile(side.mask), side.keypoints, perception.min_keypoint_score
+            SilhouetteProfile(side_mask), side.keypoints, perception.min_keypoint_score
         )
         usable = sorted(
             name

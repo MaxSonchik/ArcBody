@@ -42,6 +42,9 @@ class BodyEncoder:
         self.settings = settings
         self.device = torch.device(settings.device)
         self.trained = False
+        # Overridden from the checkpoint when one is loaded.
+        self.input_width = settings.input_width
+        self.input_height = settings.input_height
         self.model = self._build()
 
     def _build(self) -> ArcBodyNet:
@@ -62,6 +65,25 @@ class BodyEncoder:
             payload = torch.load(path, map_location="cpu", weights_only=True)
             state = payload.get("model", payload)
             dim = int(payload.get("embedding_dim", self.settings.dim))
+            # The crop size is part of the trained model, not a serving
+            # preference: a checkpoint trained on 128x256 crops and then served
+            # 96x192 ones sees a different distribution at every layer and
+            # returns quietly degraded embeddings. Honour what was trained.
+            self.input_width = int(payload.get("input_width", self.settings.input_width))
+            self.input_height = int(payload.get("input_height", self.settings.input_height))
+            if (self.input_width, self.input_height) != (
+                self.settings.input_width,
+                self.settings.input_height,
+            ):
+                logger.warning(
+                    "checkpoint %s was trained on %dx%d crops; using that instead of the "
+                    "configured %dx%d",
+                    path,
+                    self.input_width,
+                    self.input_height,
+                    self.settings.input_width,
+                    self.settings.input_height,
+                )
             model = ArcBodyNet(dim)
             missing, unexpected = model.load_state_dict(state, strict=False)
             if missing or unexpected:
@@ -93,8 +115,8 @@ class BodyEncoder:
                 build_tensor_input(
                     image,
                     observation,
-                    input_width=self.settings.input_width,
-                    input_height=self.settings.input_height,
+                    input_width=self.input_width,
+                    input_height=self.input_height,
                 )
                 for image, observation in items
             ]
