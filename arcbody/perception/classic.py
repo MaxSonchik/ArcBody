@@ -26,7 +26,7 @@ from arcbody import keypoints as kp
 from arcbody.config import PerceptionSettings
 from arcbody.measure.schema import LANDMARK_LEVELS
 from arcbody.measure.silhouette import SilhouetteProfile
-from arcbody.perception.base import PerceptionResult, largest_component, rank_observations
+from arcbody.perception.base import PerceptionResult, largest_component
 from arcbody.perception.view import classify_view
 from arcbody.types import BoundingBox, PersonObservation
 
@@ -285,21 +285,20 @@ class ClassicPerception:
             x2=float(columns[-1] + 1),
             y2=float(profile.bottom + 1),
         )
-        view, view_confidence = classify_view(points, self.settings.min_keypoint_score)
+        view, _ = classify_view(points, self.settings.min_keypoint_score)
         observation = PersonObservation(
             bbox=bbox,
             keypoints=points,
             image_size=(width, height),
             # Segmentation is all-or-nothing here, so the "detection score"
             # reports how plausibly human the silhouette's fill ratio is rather
-            # than a classifier's confidence.
+            # than a classifier's confidence. A near-rectangular blob scores
+            # low, which is what a wall or a mirror frame deserves.
             detection_score=float(np.clip(profile.fill_ratio() * 2.2, 0.2, 0.95)),
             mask=mask,
             view=view,
             backend=self.name,
         )
-        observations = rank_observations([observation], (width, height))
-        result = PerceptionResult(observations=observations, backend=self.name)
-        observation_meta = {"view_confidence": view_confidence}
-        result.observations[0].__dict__.setdefault("meta", observation_meta)
-        return result
+        # This backend segments a single subject by construction, so there is
+        # nothing to rank; the list shape is what the protocol promises.
+        return PerceptionResult(observations=[observation], backend=self.name)
