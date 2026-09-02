@@ -1,6 +1,0 @@
-outs:
-- md5: bcb8af3daefc982d816674b06f83d08a.dir
-  size: 1761248441
-  nfiles: 3
-  hash: md5
-  path: amazon_review_polarity_csv
