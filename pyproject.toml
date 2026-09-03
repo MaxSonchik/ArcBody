@@ -52,6 +52,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 # in defaults are precisely how FastAPI declares dependencies and parameters, so
 # the rule is a false positive for every route module.
 "arcbody/api/routes/*.py" = ["B008"]
+"arcbody/api/security.py" = ["B008"]
 
 [tool.mypy]
 python_version = "3.11"

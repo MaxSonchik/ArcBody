@@ -9,33 +9,13 @@ from __future__ import annotations
 
 import base64
 import time
-from collections.abc import Iterator
 
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
 
 from arcbody import imaging
-from arcbody.api.deps import reset_pipeline
-from arcbody.api.jobs import reset_job_store
-from arcbody.api.main import create_app
-from arcbody.config import reset_settings_cache
 from arcbody.training.synthetic import render, sample_appearance, sample_params, sample_pose
 from arcbody.types import ViewLabel
-
-
-@pytest.fixture
-def client(tmp_path, monkeypatch) -> Iterator[TestClient]:
-    monkeypatch.setenv("ARCBODY_PERCEPTION__BACKEND", "classic")
-    monkeypatch.setenv("ARCBODY_GALLERY__DATABASE_PATH", str(tmp_path / "api.sqlite3"))
-    reset_settings_cache()
-    reset_pipeline()
-    reset_job_store()
-    with TestClient(create_app()) as test_client:
-        yield test_client
-    reset_pipeline()
-    reset_job_store()
-    reset_settings_cache()
 
 
 @pytest.fixture

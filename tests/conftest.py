@@ -10,7 +10,9 @@ module reads settings.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
@@ -29,6 +31,9 @@ from arcbody.training.synthetic import (  # noqa: E402
     sample_pose,
 )
 from arcbody.types import ViewLabel  # noqa: E402
+
+if TYPE_CHECKING:
+    from fastapi.testclient import TestClient
 
 
 @pytest.fixture
@@ -84,3 +89,32 @@ def shoot(rng: np.random.Generator):
         )
 
     return _shoot
+
+@pytest.fixture
+def client(tmp_path: Path, monkeypatch) -> Iterator[TestClient]:
+    """An unsecured app over a private database.
+
+    No API keys are configured, so authentication is off — which is itself
+    worth testing, because the service must say so rather than pass silently.
+    """
+    from fastapi.testclient import TestClient as _TestClient
+
+    from arcbody.api.deps import reset_pipeline
+    from arcbody.api.jobs import reset_job_store
+    from arcbody.api.main import create_app
+    from arcbody.api.security import reset_rate_limiter
+    from arcbody.config import reset_settings_cache
+
+    monkeypatch.setenv("ARCBODY_PERCEPTION__BACKEND", "classic")
+    monkeypatch.setenv("ARCBODY_GALLERY__DATABASE_PATH", str(tmp_path / "api.sqlite3"))
+    monkeypatch.delenv("ARCBODY_SECURITY__API_KEYS", raising=False)
+    reset_settings_cache()
+    reset_pipeline()
+    reset_job_store()
+    reset_rate_limiter()
+    with _TestClient(create_app()) as test_client:
+        yield test_client
+    reset_pipeline()
+    reset_job_store()
+    reset_rate_limiter()
+    reset_settings_cache()

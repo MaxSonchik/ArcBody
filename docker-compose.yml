@@ -13,7 +13,13 @@ services:
     ports:
       - "8000:8000"
     environment:
+      # 'prod' makes the service refuse to start without API keys. Left at 'dev'
+      # here so a first 'docker compose up' works; set both before exposing the
+      # service to anything beyond localhost.
       ARCBODY_ENVIRONMENT: dev
+      ARCBODY_SECURITY__API_KEYS: "${ARCBODY_API_KEYS:-}"
+      ARCBODY_SECURITY__RATE_LIMIT_PER_MINUTE: 120
+      ARCBODY_SECURITY__RATE_LIMIT_BURST: 30
       ARCBODY_LOG_LEVEL: INFO
       # "auto" prefers YOLO and falls back; pin it to make the choice explicit.
       ARCBODY_PERCEPTION__BACKEND: auto
@@ -21,7 +27,7 @@ services:
       ARCBODY_GALLERY__DATABASE_PATH: /app/var/arcbody.sqlite3
       ARCBODY_EMBEDDING__WEIGHTS_PATH: /app/weights/arcbody.pt
     volumes:
-      # Enrolled body profiles are the only state. Everything else is derived
+      # Enrolled body profiles and batch job records. Everything else is derived
       # and can be recomputed from the photos the caller still holds.
       - arcbody-data:/app/var
     restart: unless-stopped

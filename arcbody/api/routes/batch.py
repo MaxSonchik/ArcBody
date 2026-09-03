@@ -16,6 +16,8 @@ router = APIRouter(prefix="/v1/batch", tags=["batch"])
 
 
 def _to_model(job: Job) -> BatchJobModel:
+    # Results appear once the job has stopped moving; a running job's partial
+    # results would invite a client to act on half an answer.
     results = None
     if job.status in {"completed", "failed"}:
         results = [
@@ -65,15 +67,18 @@ def submit_batch(
             want_control_maps=request.include_control_maps,
             strict_quality=request.strict_quality,
         )
+        # A plain JSON-able dict, not a pydantic model: the payload is written
+        # to a text column, and a model here would put the wire schema inside
+        # the job runner.
         payload: dict[str, object] = {
-            "analysis": analysis_response(result, settings),
+            "analysis": analysis_response(result, settings).model_dump(mode="json"),
         }
         if item.person_id:
             payload["profile_id"] = pipeline.enrol(item.person_id, result)
             payload["person_id"] = item.person_id
         return payload
 
-    job = get_job_store(settings.batch).submit(
+    job = get_job_store(settings).submit(
         [item.reference for item in request.items], work
     )
     return _to_model(job)
@@ -82,7 +87,7 @@ def submit_batch(
 @router.get("/{job_id}", response_model=BatchJobModel)
 def get_batch(job_id: str, settings: Settings = Depends(get_settings)) -> BatchJobModel:
     """Poll a job. Results appear once the status reaches ``completed``."""
-    return _to_model(get_job_store(settings.batch).get(job_id))
+    return _to_model(get_job_store(settings).get(job_id))
 
 
 # Re-exported so FastAPI resolves the forward reference in BatchItemResult.

@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from arcbody.api.deps import get_pipeline
+from arcbody.api.security import Caller, authenticate_optional
 from arcbody.config import Settings, get_settings
 from arcbody.pipeline import ArcBodyPipeline
 from arcbody.schemas import HealthResponse
@@ -17,6 +18,7 @@ router = APIRouter(tags=["health"])
 def health(
     pipeline: ArcBodyPipeline = Depends(get_pipeline),
     settings: Settings = Depends(get_settings),
+    caller: Caller | None = Depends(authenticate_optional),
 ) -> HealthResponse:
     """Report readiness *and* the caveats that affect result quality.
 
@@ -25,8 +27,18 @@ def health(
     means an operator finds out from a health check rather than from a user
     complaining that similarity scores look random.
     """
-    persons, profiles = pipeline.gallery.count()
+    # Reachable without a key so an orchestrator can probe liveness, but the
+    # enrolment counts are only for someone who could have read them anyway.
+    if caller is not None:
+        persons, profiles = pipeline.gallery.count()
+    else:
+        persons, profiles = -1, -1
     warnings: list[str] = []
+    if not settings.security.api_keys:
+        warnings.append(
+            "no API keys configured: the /v1 endpoints are open to anyone who can "
+            "reach this process"
+        )
     if not pipeline.encoder.trained:
         warnings.append(
             "encoder is untrained: embeddings and similarity scores are not meaningful"

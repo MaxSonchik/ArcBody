@@ -1,10 +1,17 @@
 """Persistence and search over enrolled body profiles.
 
 Storage is SQLite with the embeddings as raw ``float32`` blobs, and search is a
-vectorised brute-force cosine over an in-memory matrix rebuilt on write. At the
-stated ceiling of ~100k people that is 100 MB of floats and a few milliseconds
-per query — an approximate index would add a dependency, a build step and a
-recall cliff in exchange for nothing.
+vectorised brute-force cosine over an in-memory matrix. At 100k people that is
+100 MB of floats and a fraction of a millisecond per query, measured by
+``scripts/benchmark_gallery.py`` — an approximate index would add a dependency,
+a build step and a recall cliff in exchange for nothing.
+
+The matrix is maintained *incrementally*. Rebuilding it on every write looked
+harmless and was not: the benchmark showed a query following an enrolment
+costing 190 ms against 0.22 ms in steady state, because each write threw the
+index away and the next read paid to rebuild it. Enrolment-heavy traffic —
+exactly what a batch job produces — would have run three orders of magnitude
+slower than the steady-state number anyone would have quoted.
 
 **What is stored, and what is not.** Body embeddings and measurements are
 biometric data. This store keeps the derived vector, the ratios and the
@@ -17,6 +24,7 @@ real, complete delete rather than a soft flag.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import uuid
@@ -30,6 +38,8 @@ import numpy as np
 from arcbody.config import GallerySettings
 from arcbody.embed.encoder import fuse
 from arcbody.errors import PersonNotFoundError
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS persons (
@@ -103,11 +113,16 @@ class Gallery:
         self._connection.executescript(SCHEMA)
         self._connection.commit()
 
-        # Search index, rebuilt lazily after any write.
+        # Search index. Rows are maintained in place; ``_used`` marks how many
+        # of the matrix's rows are live, so appends and deletes cost O(1)
+        # amortised instead of a full rebuild.
         self._matrix: np.ndarray | None = None
+        self._used = 0
         self._index_ids: list[str] = []
         self._index_counts: list[int] = []
         self._index_faces: list[str | None] = []
+        self._row_of: dict[str, int] = {}
+        self._capacity_warned = False
 
     def close(self) -> None:
         with self._lock:
@@ -184,7 +199,7 @@ class Gallery:
                 ),
             )
             self._connection.commit()
-            self._invalidate()
+            self._touch_person(person_id)
         return profile_id
 
     def forget(self, person_id: str) -> int:
@@ -194,7 +209,7 @@ class Gallery:
                 "DELETE FROM persons WHERE person_id = ?", (person_id,)
             )
             self._connection.commit()
-            self._invalidate()
+            self._drop_row(person_id)
             return int(cursor.rowcount)
 
     # -- reads ------------------------------------------------------------
@@ -257,21 +272,126 @@ class Gallery:
     # -- search -----------------------------------------------------------
 
     def _invalidate(self) -> None:
+        """Drop the index entirely. Only for changes that cannot be localised."""
         self._matrix = None
+        self._used = 0
         self._index_ids = []
         self._index_counts = []
         self._index_faces = []
+        self._row_of = {}
+
+    def _person_vector(self, person_id: str) -> tuple[np.ndarray, int, str | None] | None:
+        """The fused signature of one person, straight from the database."""
+        rows = self._connection.execute(
+            """
+            SELECT p.external_face_id, f.embedding
+            FROM persons p JOIN profiles f ON f.person_id = p.person_id
+            WHERE p.person_id = ?
+            ORDER BY f.created_at
+            """,
+            (person_id,),
+        ).fetchall()
+        if not rows:
+            return None
+        vectors = [np.frombuffer(row["embedding"], dtype=np.float32) for row in rows]
+        width = len(vectors[0])
+        if any(len(vector) != width for vector in vectors):
+            return None
+        return fuse(vectors), len(vectors), rows[0]["external_face_id"]
+
+    def _touch_person(self, person_id: str) -> None:
+        """Refresh one person's row after a write.
+
+        Called with the lock held. When the index has not been built yet there
+        is nothing to refresh — the lazy full build will pick the person up.
+        """
+        if self._matrix is None:
+            return
+        entry = self._person_vector(person_id)
+        if entry is None:
+            self._drop_row(person_id)
+            return
+        vector, count, face = entry
+
+        row = self._row_of.get(person_id)
+        if row is not None:
+            if vector.size != self._matrix.shape[1]:
+                # The embedding dimension changed under a live gallery, which
+                # means the encoder checkpoint changed. Nothing local can fix
+                # that; rebuild and let the width filter sort it out.
+                self._invalidate()
+                return
+            self._matrix[row] = vector
+            self._index_counts[row] = count
+            self._index_faces[row] = face
+            return
+
+        if self._used and vector.size != self._matrix.shape[1]:
+            self._invalidate()
+            return
+        self._append_row(person_id, vector, count, face)
+
+    def _append_row(
+        self, person_id: str, vector: np.ndarray, count: int, face: str | None
+    ) -> None:
+        """Add a new person to the index, growing the backing array if needed."""
+        assert self._matrix is not None
+        if self._used >= self._matrix.shape[0] or self._matrix.shape[1] != vector.size:
+            capacity = max(64, int(self._used * 1.5) + 1)
+            grown = np.zeros((capacity, vector.size), dtype=np.float32)
+            if self._used:
+                grown[: self._used] = self._matrix[: self._used]
+            self._matrix = grown
+
+        self._matrix[self._used] = vector
+        self._index_ids.append(person_id)
+        self._index_counts.append(count)
+        self._index_faces.append(face)
+        self._row_of[person_id] = self._used
+        self._used += 1
+
+        limit = int(self.settings.max_identify_candidates)
+        if self._used > limit and not self._capacity_warned:
+            # Everyone stays searchable: quietly dropping people from an
+            # identity search is a correctness bug wearing a memory-limit
+            # costume. The warning is the signal to move to a real index.
+            self._capacity_warned = True
+            logger.warning(
+                "gallery holds %d people, above max_identify_candidates=%d; brute-force "
+                "search still returns every person but memory and latency now grow "
+                "unbounded. Consider an approximate index.",
+                self._used,
+                limit,
+            )
+
+    def _drop_row(self, person_id: str) -> None:
+        """Remove a person from the index by swapping the last row into place."""
+        if self._matrix is None:
+            return
+        row = self._row_of.pop(person_id, None)
+        if row is None:
+            return
+        last = self._used - 1
+        if row != last:
+            self._matrix[row] = self._matrix[last]
+            moved = self._index_ids[last]
+            self._index_ids[row] = moved
+            self._index_counts[row] = self._index_counts[last]
+            self._index_faces[row] = self._index_faces[last]
+            self._row_of[moved] = row
+        self._index_ids.pop()
+        self._index_counts.pop()
+        self._index_faces.pop()
+        self._used = last
 
     def _build_index(self) -> None:
-        """Materialise one fused unit vector per person."""
+        """Materialise one fused unit vector per person, from scratch."""
         rows = self._connection.execute(
             """
             SELECT p.person_id, p.external_face_id, f.embedding
             FROM persons p JOIN profiles f ON f.person_id = p.person_id
             ORDER BY p.person_id, f.created_at
-            LIMIT ?
-            """,
-            (int(self.settings.max_identify_candidates),),
+            """
         ).fetchall()
 
         grouped: dict[str, list[np.ndarray]] = {}
@@ -284,6 +404,11 @@ class Gallery:
 
         if not grouped:
             self._matrix = np.zeros((0, 0), dtype=np.float32)
+            self._used = 0
+            self._index_ids = []
+            self._index_counts = []
+            self._index_faces = []
+            self._row_of = {}
             return
 
         ids = sorted(grouped)
@@ -292,9 +417,11 @@ class Gallery:
         width = len(grouped[ids[0]][0])
         usable = [pid for pid in ids if all(len(v) == width for v in grouped[pid])]
         self._matrix = np.stack([fuse(grouped[pid]) for pid in usable]).astype(np.float32)
-        self._index_ids = usable
+        self._used = len(usable)
+        self._index_ids = list(usable)
         self._index_counts = [len(grouped[pid]) for pid in usable]
         self._index_faces = [faces[pid] for pid in usable]
+        self._row_of = {pid: row for row, pid in enumerate(usable)}
 
     def identify(
         self, embedding: np.ndarray, *, top_k: int | None = None, minimum: float = -1.0
@@ -310,14 +437,15 @@ class Gallery:
             if self._matrix is None:
                 self._build_index()
             matrix = self._matrix
+            used = self._used
             ids = list(self._index_ids)
             counts = list(self._index_counts)
             faces = list(self._index_faces)
 
-        if matrix is None or matrix.size == 0 or matrix.shape[1] != query.size:
+        if matrix is None or used == 0 or matrix.shape[1] != query.size:
             return []
 
-        scores = matrix @ query
+        scores = matrix[:used] @ query
         k = min(len(ids), top_k or self.settings.default_top_k)
         if k <= 0:
             return []

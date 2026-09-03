@@ -365,8 +365,12 @@ class HealthResponse(BaseModel):
     perception_backend: str
     encoder_trained: bool
     embedding_dim: int
-    persons: int
-    profiles: int
+    persons: int = Field(
+        ..., description="Enrolled people, or -1 when the caller is unauthenticated."
+    )
+    profiles: int = Field(
+        ..., description="Stored profiles, or -1 when the caller is unauthenticated."
+    )
     warnings: list[str]
 
 

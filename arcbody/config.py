@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 PerceptionBackend = Literal["auto", "yolo", "classic"]
 EncoderBackend = Literal["auto", "torch", "none"]
@@ -117,6 +117,48 @@ class GenAISettings(BaseModel):
     units: Literal["metric", "imperial", "both"] = "metric"
 
 
+class SecuritySettings(BaseModel):
+    """Who may call the service, and how often.
+
+    Body embeddings are biometric data, so the default posture is that an
+    unauthenticated ``/v1`` surface is a misconfiguration rather than a
+    convenience. In ``prod`` the service refuses to start without keys; in
+    ``dev`` and ``staging`` it starts, disables auth, and says so loudly on
+    ``/healthz`` — silence there would be the worst of both.
+    """
+
+    #: Accepted API keys. Set ``ARCBODY_SECURITY__API_KEYS`` to a JSON array or
+    #: a comma-separated list. Empty means "no authentication", which is only
+    #: permitted outside production.
+    #:
+    #: ``NoDecode`` turns off the settings source's own JSON parsing, which
+    #: otherwise rejects ``key1,key2`` before any validator sees it — the
+    #: comma-separated form has to be handled here or not at all.
+    api_keys: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    header_name: str = "X-API-Key"
+
+    #: Sustained rate per caller, and the burst it may spend at once.
+    rate_limit_per_minute: int = 120
+    rate_limit_burst: int = 30
+    #: Rate limiting is per process. Behind several replicas each gets its own
+    #: budget, so a shared store is needed before the limit means anything
+    #: globally. Set false to disable rather than to pretend.
+    rate_limit_enabled: bool = True
+
+    @field_validator("api_keys", mode="before")
+    @classmethod
+    def _parse_keys(cls, value: object) -> object:
+        """Accept a JSON array or a comma-separated list."""
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        if text.startswith("["):
+            import json
+
+            return json.loads(text)
+        return [item.strip() for item in text.split(",") if item.strip()]
+
+
 class BatchSettings(BaseModel):
     """Asynchronous batch jobs."""
 
@@ -125,6 +167,10 @@ class BatchSettings(BaseModel):
     worker_threads: int = 2
     # Finished jobs are evicted this long after completion.
     retain_seconds: int = 3600
+    # Job state lives in the gallery database so a completed job can still be
+    # polled after a restart. Photographs are never persisted, so a job
+    # interrupted mid-flight cannot resume and is failed explicitly instead.
+    persist: bool = True
 
 
 class Settings(BaseSettings):
@@ -147,6 +193,7 @@ class Settings(BaseSettings):
     gallery: GallerySettings = Field(default_factory=GallerySettings)
     genai: GenAISettings = Field(default_factory=GenAISettings)
     batch: BatchSettings = Field(default_factory=BatchSettings)
+    security: SecuritySettings = Field(default_factory=SecuritySettings)
 
 
 @lru_cache(maxsize=1)
